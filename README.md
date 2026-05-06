@@ -16,9 +16,8 @@ By default, Terraform/Ansible deploy this artifact via `jar_local_path = "ansibl
 - Terraform `>= 1.5`
 - Ansible
 - SSH key pair available on your machine (default: `~/.ssh/id_rsa` and `~/.ssh/id_rsa.pub`)
-- A STACKIT service account with:
-	- service account email (used as project owner in `target_project_owner_email`)
-	- downloaded JSON key file (referenced via `service_account_key_path`)
+- A STACKIT service account email (used as project owner in `target_project_owner_email`)
+- Downloaded JSON key file for this service account (referenced via `service_account_key_path`)
 - Permissions for the service account on folder or organization scope so project/network/compute resources can be created
 - Parent container ID where the project should be created (`parent_container_id`)
 

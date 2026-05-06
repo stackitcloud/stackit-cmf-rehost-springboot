@@ -15,23 +15,41 @@ By default, Terraform/Ansible deploy this artifact via `jar_local_path = "ansibl
 
 - Terraform `>= 1.5`
 - Ansible
-- A valid STACKIT API token as environment variable:
+- SSH key pair available on your machine (default: `~/.ssh/id_rsa` and `~/.ssh/id_rsa.pub`)
+- A STACKIT service account with:
+	- service account email (used as project owner in `target_project_owner_email`)
+	- downloaded JSON key file (referenced via `service_account_key_path`)
+- Permissions for the service account on folder or organization scope so project/network/compute resources can be created
+- Parent container ID where the project should be created (`parent_container_id`)
 
-```bash
-export STACKIT_SERVICE_ACCOUNT_TOKEN="<token>"
-```
+Authentication for this example is based on the service account JSON key file.
+`STACKIT_SERVICE_ACCOUNT_TOKEN` is not required.
 
 ## Quick start
 
+1. Copy the example variables file:
+
 ```bash
 cp env.tfvars.example env.tfvars
-# adjust values where required
+```
+
+2. Edit `env.tfvars` and set at least:
+
+- `service_account_key_path`
+- `target_project_owner_email`
+- `parent_container_id`
+
+`bootstrap_project_id` can stay as placeholder when `parent_container_id` is set.
+
+3. Initialize and run Terraform:
+
+```bash
 terraform init
 terraform plan -var-file=env.tfvars
 terraform apply -var-file=env.tfvars
 ```
 
-After apply:
+4. After apply:
 
 ```bash
 terraform output vm_public_ip
@@ -51,6 +69,6 @@ terraform destroy -var-file=env.tfvars
 
 ## Notes
 
-- `project_id` is prefilled with the test value from the current setup.
+- `env.tfvars.example` contains placeholders by design. Fill them in `env.tfvars` before running.
 - If your region uses a different image/flavor, adjust `image_id` and `machine_type`.
 - `ansible` is triggered automatically by Terraform via `terraform_data`.

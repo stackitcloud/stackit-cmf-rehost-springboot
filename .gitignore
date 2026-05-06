@@ -1,0 +1,10 @@
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+crash.log
+*.auto.tfvars
+ansible/inventory.ini
+env.tfvars
+tfplan
+ansible/files/springboot-app.jar

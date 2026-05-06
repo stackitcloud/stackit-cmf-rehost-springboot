@@ -1,0 +1,88 @@
+---
+- name: Rehost Spring Boot service on STACKIT VM
+  hosts: rehost
+  become: true
+  gather_facts: false
+  vars:
+    app_user: spring
+    app_group: spring
+    app_dir: /opt/springboot
+    app_jar: /opt/springboot/app.jar
+
+  pre_tasks:
+    - name: Wait for SSH to become reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        delay: 5
+
+    - name: Gather facts after SSH is ready
+      ansible.builtin.setup:
+
+  tasks:
+    - name: Install runtime packages
+      ansible.builtin.apt:
+        name:
+          - openjdk-17-jre-headless
+        update_cache: true
+        state: present
+
+    - name: Ensure app group exists
+      ansible.builtin.group:
+        name: "{{ app_group }}"
+        state: present
+
+    - name: Ensure app user exists
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        shell: /usr/sbin/nologin
+        create_home: false
+        state: present
+
+    - name: Create app directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Copy Spring Boot JAR
+      ansible.builtin.copy:
+        src: "{{ jar_local_path }}"
+        dest: "{{ app_jar }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+
+    - name: Install systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/springboot.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Spring Boot Rehost Service
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ app_user }}
+          Group={{ app_group }}
+          WorkingDirectory={{ app_dir }}
+          ExecStart=/usr/bin/java -jar {{ app_jar }}
+          Restart=always
+          RestartSec=5
+          SuccessExitStatus=143
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start service
+      ansible.builtin.systemd:
+        name: springboot.service
+        enabled: true
+        state: started

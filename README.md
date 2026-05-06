@@ -8,6 +8,9 @@ Runnable Rehost automation example for STACKIT using Terraform and Ansible.
 - Assigns a public IP and SSH key.
 - Bridges to Ansible to install Java, copy a Spring Boot JAR, and run it as a `systemd` service.
 
+The repository includes a ready-to-deploy sample Spring Boot artifact at `ansible/files/springboot-app.jar`.
+By default, Terraform/Ansible deploy this artifact via `jar_local_path = "ansible/files/springboot-app.jar"`.
+
 ## Prerequisites
 
 - Terraform `>= 1.5`
@@ -34,6 +37,11 @@ After apply:
 terraform output vm_public_ip
 terraform output application_url
 ```
+
+## Spring Boot artifact used for deployment
+
+- Default artifact path: `ansible/files/springboot-app.jar`
+- To deploy a different app, replace this file or set `jar_local_path` in `env.tfvars`.
 
 ## Destroy
 

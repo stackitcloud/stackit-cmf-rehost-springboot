@@ -7,4 +7,3 @@ crash.log
 ansible/inventory.ini
 env.tfvars
 tfplan
-ansible/files/springboot-app.jar

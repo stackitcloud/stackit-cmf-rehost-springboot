@@ -23,8 +23,190 @@
       ansible.builtin.apt:
         name:
           - openjdk-17-jre-headless
+          - curl
         update_cache: true
         state: present
+
+    - name: Install node exporter package
+      ansible.builtin.apt:
+        name:
+          - prometheus-node-exporter
+        state: present
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Ensure textfile collector directory exists
+      ansible.builtin.file:
+        path: /var/lib/node_exporter/textfile_collector
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Configure node exporter textfile collector
+      ansible.builtin.copy:
+        dest: /etc/default/prometheus-node-exporter
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          ARGS="--web.listen-address=:{{ node_exporter_port | default(9100) }} --collector.textfile.directory=/var/lib/node_exporter/textfile_collector"
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Install Spring Boot health metric script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/springboot-health-metrics.sh
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          METRICS_DIR="/var/lib/node_exporter/textfile_collector"
+          METRICS_FILE="$METRICS_DIR/springboot_health.prom"
+
+          status=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:{{ springboot_app_port | default(8080) }}/" || true)
+
+          if [[ "$status" =~ ^[23] ]]; then
+            up=1
+          else
+            up=0
+          fi
+
+          cat > "$METRICS_FILE" <<EOF
+          springboot_up $up
+          springboot_http_status_code $status
+          EOF
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Install local Spring Boot load generator script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/springboot-loadgen.sh
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          target="http://127.0.0.1:{{ springboot_app_port | default(8080) }}{{ springboot_loadgen_target_path | default('/') }}"
+          metrics_dir="/var/lib/node_exporter/textfile_collector"
+          metrics_file="$metrics_dir/springboot_loadgen.prom"
+          state_file="$metrics_dir/springboot_loadgen_total.state"
+          burst_min={{ springboot_loadgen_burst_min_requests | default(2) }}
+          burst_max={{ springboot_loadgen_burst_max_requests | default(15) }}
+
+          if (( burst_max < burst_min )); then
+            burst_max=$burst_min
+          fi
+
+          mkdir -p "$metrics_dir"
+          burst_count=$(( RANDOM % (burst_max - burst_min + 1) + burst_min ))
+          success_count=0
+
+          previous_total=0
+          if [[ -f "$state_file" ]]; then
+            previous_total=$(cat "$state_file" 2>/dev/null || echo 0)
+          fi
+
+          if ! [[ "$previous_total" =~ ^[0-9]+$ ]]; then
+            previous_total=0
+          fi
+
+          for _ in $(seq 1 "$burst_count"); do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "$target" || true)
+            if [[ "$code" =~ ^[23] ]]; then
+              success_count=$((success_count + 1))
+            fi
+            pause_ms=$(( RANDOM % 850 + 50 ))
+            sleep "$(awk "BEGIN { printf \"%.3f\", $pause_ms / 1000 }")"
+          done
+
+          total_requests=$((previous_total + burst_count))
+          failed_count=$((burst_count - success_count))
+          cat > "$state_file" <<EOF
+          $total_requests
+          EOF
+
+          cat > "$metrics_file" <<EOF
+          springboot_http_requests_total $total_requests
+          springboot_http_requests_last_burst $burst_count
+          springboot_http_requests_last_burst_success $success_count
+          springboot_http_requests_last_burst_failed $failed_count
+          EOF
+      when: enable_local_load_generator | default(false) | bool
+
+    - name: Install systemd unit for local Spring Boot load generator
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/springboot-loadgen.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Generate local irregular HTTP load for Spring Boot demo service
+          After=network-online.target springboot.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/springboot-loadgen.sh
+      when: enable_local_load_generator | default(false) | bool
+
+    - name: Install systemd timer for local Spring Boot load generator
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/springboot-loadgen.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run local Spring Boot load generator with jitter
+
+          [Timer]
+          OnBootSec=45s
+          OnUnitActiveSec={{ springboot_loadgen_base_interval_seconds | default(20) }}s
+          RandomizedDelaySec={{ springboot_loadgen_randomized_delay_seconds | default(40) }}s
+          Unit=springboot-loadgen.service
+
+          [Install]
+          WantedBy=timers.target
+      when: enable_local_load_generator | default(false) | bool
+
+    - name: Install systemd unit for Spring Boot health metric writer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/springboot-health-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Write Spring Boot health metrics for node exporter textfile collector
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/springboot-health-metrics.sh
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Install systemd timer for Spring Boot health metric writer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/springboot-health-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run Spring Boot health metrics writer every 30 seconds
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec=30s
+          Unit=springboot-health-metrics.service
+
+          [Install]
+          WantedBy=timers.target
+      when: enable_node_exporter | default(false) | bool
 
     - name: Ensure app group exists
       ansible.builtin.group:
@@ -80,6 +262,39 @@
     - name: Reload systemd
       ansible.builtin.systemd:
         daemon_reload: true
+
+    - name: Enable and restart node exporter
+      ansible.builtin.systemd:
+        name: prometheus-node-exporter.service
+        enabled: true
+        state: restarted
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Run Spring Boot health metrics writer once
+      ansible.builtin.systemd:
+        name: springboot-health-metrics.service
+        state: started
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Enable and start Spring Boot health metrics timer
+      ansible.builtin.systemd:
+        name: springboot-health-metrics.timer
+        enabled: true
+        state: started
+      when: enable_node_exporter | default(false) | bool
+
+    - name: Run local Spring Boot load generator once
+      ansible.builtin.systemd:
+        name: springboot-loadgen.service
+        state: started
+      when: enable_local_load_generator | default(false) | bool
+
+    - name: Enable and start local Spring Boot load generator timer
+      ansible.builtin.systemd:
+        name: springboot-loadgen.timer
+        enabled: true
+        state: started
+      when: enable_local_load_generator | default(false) | bool
 
     - name: Enable and start service
       ansible.builtin.systemd:

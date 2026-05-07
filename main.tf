@@ -77,6 +77,21 @@ resource "stackit_security_group_rule" "http" {
   }
 }
 
+resource "stackit_security_group_rule" "node_exporter" {
+  count = var.enable_observability && var.enable_node_exporter && var.expose_node_exporter_port ? 1 : 0
+
+  project_id        = local.effective_project_id
+  security_group_id = stackit_security_group.rehost_sg.security_group_id
+  direction         = "ingress"
+  protocol = {
+    name = "tcp"
+  }
+  port_range = {
+    min = var.node_exporter_port
+    max = var.node_exporter_port
+  }
+}
+
 resource "stackit_network" "rehost_net" {
   project_id         = local.effective_project_id
   name               = "rehost-net"
@@ -128,6 +143,44 @@ resource "stackit_server" "rehost_vm" {
   keypair_name      = stackit_key_pair.rehost_key.name
 }
 
+resource "stackit_observability_instance" "rehost_obs" {
+  count = var.enable_observability ? 1 : 0
+
+  project_id = local.effective_project_id
+  name       = var.observability_instance_name
+  plan_name  = var.observability_plan_name
+}
+
+resource "stackit_observability_scrapeconfig" "node_exporter" {
+  count = var.enable_observability && var.enable_node_exporter ? 1 : 0
+
+  project_id   = local.effective_project_id
+  instance_id  = stackit_observability_instance.rehost_obs[0].instance_id
+  name         = "${var.server_name}-node-exporter"
+  metrics_path = "/metrics"
+  targets = [{
+    urls = ["${stackit_public_ip.rehost_public_ip.ip}:${var.node_exporter_port}"]
+  }]
+  scheme          = "http"
+  scrape_interval = var.observability_scrape_interval
+  scrape_timeout  = var.observability_scrape_timeout
+}
+
+resource "stackit_observability_scrapeconfig" "springboot_app" {
+  count = var.enable_observability && var.enable_springboot_metrics_scrape ? 1 : 0
+
+  project_id   = local.effective_project_id
+  instance_id  = stackit_observability_instance.rehost_obs[0].instance_id
+  name         = "${var.server_name}-springboot"
+  metrics_path = var.springboot_metrics_path
+  targets = [{
+    urls = ["${stackit_public_ip.rehost_public_ip.ip}:${var.springboot_metrics_port}"]
+  }]
+  scheme          = "http"
+  scrape_interval = var.observability_scrape_interval
+  scrape_timeout  = var.observability_scrape_timeout
+}
+
 resource "terraform_data" "ansible_inventory" {
   depends_on = [stackit_server.rehost_vm]
 
@@ -135,14 +188,24 @@ resource "terraform_data" "ansible_inventory" {
     stackit_public_ip.rehost_public_ip.ip,
     var.ssh_user,
     pathexpand(var.private_ssh_key_path),
-    abspath(var.jar_local_path)
+    abspath(var.jar_local_path),
+    tostring(var.enable_observability),
+    tostring(var.enable_node_exporter),
+    tostring(var.node_exporter_port),
+    tostring(var.springboot_app_port),
+    tostring(var.enable_local_load_generator),
+    var.springboot_loadgen_target_path,
+    tostring(var.springboot_loadgen_base_interval_seconds),
+    tostring(var.springboot_loadgen_randomized_delay_seconds),
+    tostring(var.springboot_loadgen_burst_min_requests),
+    tostring(var.springboot_loadgen_burst_max_requests)
   ]
 
   provisioner "local-exec" {
     command = <<-EOT
       cat > ${path.module}/ansible/inventory.ini <<'EOF'
       [rehost]
-      ${stackit_public_ip.rehost_public_ip.ip} ansible_user=${var.ssh_user} ansible_ssh_private_key_file=${pathexpand(var.private_ssh_key_path)} ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' jar_local_path=${abspath(var.jar_local_path)}
+      ${stackit_public_ip.rehost_public_ip.ip} ansible_user=${var.ssh_user} ansible_ssh_private_key_file=${pathexpand(var.private_ssh_key_path)} ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' jar_local_path=${abspath(var.jar_local_path)} enable_node_exporter=${var.enable_observability && var.enable_node_exporter} node_exporter_port=${var.node_exporter_port} springboot_app_port=${var.springboot_app_port} enable_local_load_generator=${var.enable_local_load_generator} springboot_loadgen_target_path=${var.springboot_loadgen_target_path} springboot_loadgen_base_interval_seconds=${var.springboot_loadgen_base_interval_seconds} springboot_loadgen_randomized_delay_seconds=${var.springboot_loadgen_randomized_delay_seconds} springboot_loadgen_burst_min_requests=${var.springboot_loadgen_burst_min_requests} springboot_loadgen_burst_max_requests=${var.springboot_loadgen_burst_max_requests}
       EOF
     EOT
   }
@@ -159,10 +222,73 @@ resource "terraform_data" "run_ansible" {
   triggers_replace = [
     stackit_server.rehost_vm.server_id,
     stackit_public_ip.rehost_public_ip.ip,
-    filesha256(var.jar_local_path)
+    filesha256(var.jar_local_path),
+    tostring(var.enable_observability),
+    tostring(var.enable_node_exporter),
+    tostring(var.node_exporter_port),
+    tostring(var.springboot_app_port),
+    tostring(var.enable_local_load_generator),
+    var.springboot_loadgen_target_path,
+    tostring(var.springboot_loadgen_base_interval_seconds),
+    tostring(var.springboot_loadgen_randomized_delay_seconds),
+    tostring(var.springboot_loadgen_burst_min_requests),
+    tostring(var.springboot_loadgen_burst_max_requests)
   ]
 
   provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
     command = "LANG=C.UTF-8 LC_ALL=C.UTF-8 ansible-playbook -i ${path.module}/ansible/inventory.ini ${path.module}/ansible/playbook.yml"
+  }
+}
+
+resource "terraform_data" "grafana_dashboard" {
+  count = var.enable_observability && var.create_grafana_dashboard ? 1 : 0
+
+  depends_on = [
+    stackit_observability_instance.rehost_obs,
+    stackit_observability_scrapeconfig.node_exporter,
+    stackit_observability_scrapeconfig.springboot_app
+  ]
+
+  triggers_replace = [
+    stackit_observability_instance.rehost_obs[0].instance_id,
+    stackit_observability_instance.rehost_obs[0].grafana_url,
+    stackit_observability_instance.rehost_obs[0].grafana_initial_admin_user,
+    stackit_observability_instance.rehost_obs[0].grafana_initial_admin_password,
+    filesha256("${path.module}/dashboards/rehost-observability-dashboard.json")
+  ]
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      GRAFANA_URL    = stackit_observability_instance.rehost_obs[0].grafana_url
+      GRAFANA_USER   = stackit_observability_instance.rehost_obs[0].grafana_initial_admin_user
+      GRAFANA_PASS   = stackit_observability_instance.rehost_obs[0].grafana_initial_admin_password
+      DASHBOARD_FILE = "${path.module}/dashboards/rehost-observability-dashboard.json"
+    }
+    command = <<-EOT
+      set -euo pipefail
+
+        # Avoid SIGPIPE from jq|head under pipefail when multiple datasources exist.
+        PROM_UID=$(curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASS" "$GRAFANA_URL/api/datasources" | jq -r 'map(select(.type == "prometheus"))[0].uid // empty')
+
+      if [ -z "$PROM_UID" ]; then
+        echo "No Prometheus datasource uid found in Grafana; skipping dashboard import."
+        exit 0
+      fi
+
+      DASHBOARD_JSON=$(sed "s/__PROM_UID__/$PROM_UID/g" "$DASHBOARD_FILE")
+      PAYLOAD_FILE=$(mktemp)
+      trap 'rm -f "$PAYLOAD_FILE"' EXIT
+      printf '{"dashboard":%s,"overwrite":true}' "$DASHBOARD_JSON" > "$PAYLOAD_FILE"
+
+      curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASS" \
+        -H "Content-Type: application/json" \
+        -X POST \
+        "$GRAFANA_URL/api/dashboards/db" \
+        --data-binary @"$PAYLOAD_FILE" >/dev/null
+
+      echo "Grafana dashboard imported successfully."
+    EOT
   }
 }

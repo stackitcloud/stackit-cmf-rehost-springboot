@@ -7,6 +7,7 @@ Runnable Rehost automation example for STACKIT using Terraform and Ansible.
 - Provisions network/security and a VM in STACKIT via Terraform.
 - Assigns a public IP and SSH key.
 - Bridges to Ansible to install Java, copy a Spring Boot JAR, and run it as a `systemd` service.
+- Optionally provisions STACKIT Observability, registers scrape jobs, and imports a starter Grafana dashboard.
 
 The repository includes a ready-to-deploy sample Spring Boot artifact at `ansible/files/springboot-app.jar`.
 By default, Terraform/Ansible deploy this artifact via `jar_local_path = "ansible/files/springboot-app.jar"`.
@@ -48,12 +49,63 @@ terraform plan -var-file=env.tfvars
 terraform apply -var-file=env.tfvars
 ```
 
+To enable observability rollout in the same apply, set these values in `env.tfvars`:
+
+- `enable_observability = true`
+- `enable_node_exporter = true`
+- `create_grafana_dashboard = true`
+
+Optional (only if your app exposes Prometheus metrics):
+
+- `enable_springboot_metrics_scrape = true`
+- `springboot_metrics_path = "/actuator/prometheus"`
+
+Optional (to generate local demo traffic directly from the VM):
+
+- `enable_local_load_generator = true`
+
 4. After apply:
 
 ```bash
 terraform output vm_public_ip
 terraform output application_url
+terraform output observability_grafana_url
 ```
+
+## Observability behavior
+
+- When `enable_observability = true`, Terraform creates a STACKIT Observability instance.
+- Ansible installs `prometheus-node-exporter` on the VM and writes custom app health metrics (`springboot_up`, `springboot_http_status_code`) via the textfile collector.
+- If `enable_local_load_generator = true`, Ansible also writes request counter metrics (`springboot_http_requests_total`) via the same textfile collector.
+- Terraform creates a scrape job for node exporter (`:9100/metrics`).
+- Optionally, Terraform also creates a scrape job for `springboot_metrics_path`.
+- If `create_grafana_dashboard = true`, Terraform imports `dashboards/rehost-observability-dashboard.json` into Grafana.
+- If `enable_local_load_generator = true`, Ansible installs a local load generator (`springboot-loadgen.service` + `springboot-loadgen.timer`) that calls the app endpoint with an irregular burst profile.
+
+### Local irregular load profile
+
+You can tune the generated load in `env.tfvars`:
+
+- `springboot_loadgen_target_path` (default: `/`)
+- `springboot_loadgen_base_interval_seconds` (default: `20`)
+- `springboot_loadgen_randomized_delay_seconds` (default: `40`)
+- `springboot_loadgen_burst_min_requests` (default: `2`)
+- `springboot_loadgen_burst_max_requests` (default: `15`)
+
+The timer uses `OnUnitActiveSec` + `RandomizedDelaySec`, and each run sends a random number of requests with random pauses between requests.
+
+Request-related exported metrics from the load generator:
+
+- `springboot_http_requests_total`
+- `springboot_http_requests_last_burst`
+- `springboot_http_requests_last_burst_success`
+- `springboot_http_requests_last_burst_failed`
+
+The default dashboard includes `Spring Boot HTTP Requests (5m)` based on:
+
+`sum by (instance) (increase(springboot_http_requests_total[5m]))`
+
+Security note: with `expose_node_exporter_port = true`, port `9100` is exposed via the security group. Restrict this according to your network policy.
 
 ## Spring Boot artifact used for deployment
 

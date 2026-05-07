@@ -34,6 +34,13 @@
         state: present
       when: enable_node_exporter | default(false) | bool
 
+    - name: Install stress package for local load profile
+      ansible.builtin.apt:
+        name:
+          - stress-ng
+        state: present
+      when: enable_local_load_generator | default(false) | bool
+
     - name: Ensure textfile collector directory exists
       ansible.builtin.file:
         path: /var/lib/node_exporter/textfile_collector
@@ -94,16 +101,34 @@
           metrics_dir="/var/lib/node_exporter/textfile_collector"
           metrics_file="$metrics_dir/springboot_loadgen.prom"
           state_file="$metrics_dir/springboot_loadgen_total.state"
-          burst_min={{ springboot_loadgen_burst_min_requests | default(2) }}
-          burst_max={{ springboot_loadgen_burst_max_requests | default(15) }}
+          burst_min={{ springboot_loadgen_burst_min_requests | default(40) }}
+          burst_max={{ springboot_loadgen_burst_max_requests | default(160) }}
+          stress_enabled={{ springboot_loadgen_enable_stress | default(true) | bool | ternary('1', '0') }}
+          stress_cpu_workers={{ springboot_loadgen_stress_cpu_workers | default(2) }}
+          stress_vm_workers={{ springboot_loadgen_stress_vm_workers | default(1) }}
+          stress_vm_bytes="{{ springboot_loadgen_stress_vm_bytes | default('40%') }}"
+          stress_timeout_seconds={{ springboot_loadgen_stress_timeout_seconds | default(15) }}
 
           if (( burst_max < burst_min )); then
             burst_max=$burst_min
           fi
 
+          if (( stress_cpu_workers < 1 )); then
+            stress_cpu_workers=1
+          fi
+
+          if (( stress_vm_workers < 1 )); then
+            stress_vm_workers=1
+          fi
+
+          if (( stress_timeout_seconds < 1 )); then
+            stress_timeout_seconds=1
+          fi
+
           mkdir -p "$metrics_dir"
           burst_count=$(( RANDOM % (burst_max - burst_min + 1) + burst_min ))
           success_count=0
+          stress_applied=0
 
           previous_total=0
           if [[ -f "$state_file" ]]; then
@@ -114,14 +139,31 @@
             previous_total=0
           fi
 
+          if (( stress_enabled == 1 )) && command -v stress-ng >/dev/null 2>&1; then
+            stress_applied=1
+            stress-ng \
+              --cpu "$stress_cpu_workers" \
+              --vm "$stress_vm_workers" \
+              --vm-bytes "$stress_vm_bytes" \
+              --timeout "${stress_timeout_seconds}s" \
+              --metrics-brief >/dev/null 2>&1 &
+            stress_pid=$!
+          else
+            stress_pid=""
+          fi
+
           for _ in $(seq 1 "$burst_count"); do
             code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 3 "$target" || true)
             if [[ "$code" =~ ^[23] ]]; then
               success_count=$((success_count + 1))
             fi
-            pause_ms=$(( RANDOM % 850 + 50 ))
+            pause_ms=$(( RANDOM % 250 + 10 ))
             sleep "$(awk "BEGIN { printf \"%.3f\", $pause_ms / 1000 }")"
           done
+
+          if [[ -n "$stress_pid" ]]; then
+            wait "$stress_pid" || true
+          fi
 
           total_requests=$((previous_total + burst_count))
           failed_count=$((burst_count - success_count))
@@ -134,6 +176,11 @@
           springboot_http_requests_last_burst $burst_count
           springboot_http_requests_last_burst_success $success_count
           springboot_http_requests_last_burst_failed $failed_count
+          springboot_loadgen_stress_enabled $stress_enabled
+          springboot_loadgen_stress_applied $stress_applied
+          springboot_loadgen_stress_cpu_workers $stress_cpu_workers
+          springboot_loadgen_stress_vm_workers $stress_vm_workers
+          springboot_loadgen_stress_timeout_seconds $stress_timeout_seconds
           EOF
       when: enable_local_load_generator | default(false) | bool
 
@@ -165,8 +212,8 @@
 
           [Timer]
           OnBootSec=45s
-          OnUnitActiveSec={{ springboot_loadgen_base_interval_seconds | default(20) }}s
-          RandomizedDelaySec={{ springboot_loadgen_randomized_delay_seconds | default(40) }}s
+          OnUnitActiveSec={{ springboot_loadgen_base_interval_seconds | default(8) }}s
+          RandomizedDelaySec={{ springboot_loadgen_randomized_delay_seconds | default(8) }}s
           Unit=springboot-loadgen.service
 
           [Install]

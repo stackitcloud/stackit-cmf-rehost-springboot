@@ -198,14 +198,19 @@ resource "terraform_data" "ansible_inventory" {
     tostring(var.springboot_loadgen_base_interval_seconds),
     tostring(var.springboot_loadgen_randomized_delay_seconds),
     tostring(var.springboot_loadgen_burst_min_requests),
-    tostring(var.springboot_loadgen_burst_max_requests)
+    tostring(var.springboot_loadgen_burst_max_requests),
+    tostring(var.springboot_loadgen_enable_stress),
+    tostring(var.springboot_loadgen_stress_cpu_workers),
+    tostring(var.springboot_loadgen_stress_vm_workers),
+    var.springboot_loadgen_stress_vm_bytes,
+    tostring(var.springboot_loadgen_stress_timeout_seconds)
   ]
 
   provisioner "local-exec" {
     command = <<-EOT
       cat > ${path.module}/ansible/inventory.ini <<'EOF'
       [rehost]
-      ${stackit_public_ip.rehost_public_ip.ip} ansible_user=${var.ssh_user} ansible_ssh_private_key_file=${pathexpand(var.private_ssh_key_path)} ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' jar_local_path=${abspath(var.jar_local_path)} enable_node_exporter=${var.enable_observability && var.enable_node_exporter} node_exporter_port=${var.node_exporter_port} springboot_app_port=${var.springboot_app_port} enable_local_load_generator=${var.enable_local_load_generator} springboot_loadgen_target_path=${var.springboot_loadgen_target_path} springboot_loadgen_base_interval_seconds=${var.springboot_loadgen_base_interval_seconds} springboot_loadgen_randomized_delay_seconds=${var.springboot_loadgen_randomized_delay_seconds} springboot_loadgen_burst_min_requests=${var.springboot_loadgen_burst_min_requests} springboot_loadgen_burst_max_requests=${var.springboot_loadgen_burst_max_requests}
+      ${stackit_public_ip.rehost_public_ip.ip} ansible_user=${var.ssh_user} ansible_ssh_private_key_file=${pathexpand(var.private_ssh_key_path)} ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' jar_local_path=${abspath(var.jar_local_path)} enable_node_exporter=${var.enable_observability && var.enable_node_exporter} node_exporter_port=${var.node_exporter_port} springboot_app_port=${var.springboot_app_port} enable_local_load_generator=${var.enable_local_load_generator} springboot_loadgen_target_path=${var.springboot_loadgen_target_path} springboot_loadgen_base_interval_seconds=${var.springboot_loadgen_base_interval_seconds} springboot_loadgen_randomized_delay_seconds=${var.springboot_loadgen_randomized_delay_seconds} springboot_loadgen_burst_min_requests=${var.springboot_loadgen_burst_min_requests} springboot_loadgen_burst_max_requests=${var.springboot_loadgen_burst_max_requests} springboot_loadgen_enable_stress=${var.springboot_loadgen_enable_stress} springboot_loadgen_stress_cpu_workers=${var.springboot_loadgen_stress_cpu_workers} springboot_loadgen_stress_vm_workers=${var.springboot_loadgen_stress_vm_workers} springboot_loadgen_stress_vm_bytes=${var.springboot_loadgen_stress_vm_bytes} springboot_loadgen_stress_timeout_seconds=${var.springboot_loadgen_stress_timeout_seconds}
       EOF
     EOT
   }
@@ -232,7 +237,12 @@ resource "terraform_data" "run_ansible" {
     tostring(var.springboot_loadgen_base_interval_seconds),
     tostring(var.springboot_loadgen_randomized_delay_seconds),
     tostring(var.springboot_loadgen_burst_min_requests),
-    tostring(var.springboot_loadgen_burst_max_requests)
+    tostring(var.springboot_loadgen_burst_max_requests),
+    tostring(var.springboot_loadgen_enable_stress),
+    tostring(var.springboot_loadgen_stress_cpu_workers),
+    tostring(var.springboot_loadgen_stress_vm_workers),
+    var.springboot_loadgen_stress_vm_bytes,
+    tostring(var.springboot_loadgen_stress_timeout_seconds)
   ]
 
   provisioner "local-exec" {

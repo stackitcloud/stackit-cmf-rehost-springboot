@@ -171,24 +171,54 @@ variable "springboot_loadgen_target_path" {
 variable "springboot_loadgen_base_interval_seconds" {
   type        = number
   description = "Base interval in seconds for the systemd timer of the local load generator"
-  default     = 20
+  default     = 8
 }
 
 variable "springboot_loadgen_randomized_delay_seconds" {
   type        = number
   description = "Additional randomized delay in seconds for the local load generator timer"
-  default     = 40
+  default     = 8
 }
 
 variable "springboot_loadgen_burst_min_requests" {
   type        = number
   description = "Minimum number of HTTP requests per generated load burst"
-  default     = 2
+  default     = 40
 }
 
 variable "springboot_loadgen_burst_max_requests" {
   type        = number
   description = "Maximum number of HTTP requests per generated load burst"
+  default     = 160
+}
+
+variable "springboot_loadgen_enable_stress" {
+  type        = bool
+  description = "Enable CPU and memory stress during each generated load burst"
+  default     = true
+}
+
+variable "springboot_loadgen_stress_cpu_workers" {
+  type        = number
+  description = "Number of stress-ng CPU workers executed per load burst"
+  default     = 2
+}
+
+variable "springboot_loadgen_stress_vm_workers" {
+  type        = number
+  description = "Number of stress-ng VM workers executed per load burst"
+  default     = 1
+}
+
+variable "springboot_loadgen_stress_vm_bytes" {
+  type        = string
+  description = "Memory size per VM worker for stress-ng, for example 256M or 40%"
+  default     = "40%"
+}
+
+variable "springboot_loadgen_stress_timeout_seconds" {
+  type        = number
+  description = "Duration in seconds of CPU and memory stress per generated load burst"
   default     = 15
 }
 

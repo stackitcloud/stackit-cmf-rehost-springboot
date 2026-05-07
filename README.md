@@ -87,12 +87,18 @@ terraform output observability_grafana_url
 You can tune the generated load in `env.tfvars`:
 
 - `springboot_loadgen_target_path` (default: `/`)
-- `springboot_loadgen_base_interval_seconds` (default: `20`)
-- `springboot_loadgen_randomized_delay_seconds` (default: `40`)
-- `springboot_loadgen_burst_min_requests` (default: `2`)
-- `springboot_loadgen_burst_max_requests` (default: `15`)
+- `springboot_loadgen_base_interval_seconds` (default: `8`)
+- `springboot_loadgen_randomized_delay_seconds` (default: `8`)
+- `springboot_loadgen_burst_min_requests` (default: `40`)
+- `springboot_loadgen_burst_max_requests` (default: `160`)
+- `springboot_loadgen_enable_stress` (default: `true`)
+- `springboot_loadgen_stress_cpu_workers` (default: `2`)
+- `springboot_loadgen_stress_vm_workers` (default: `1`)
+- `springboot_loadgen_stress_vm_bytes` (default: `40%`)
+- `springboot_loadgen_stress_timeout_seconds` (default: `15`)
 
-The timer uses `OnUnitActiveSec` + `RandomizedDelaySec`, and each run sends a random number of requests with random pauses between requests.
+The timer uses `OnUnitActiveSec` + `RandomizedDelaySec`, and each run sends a random number of requests with short random pauses between requests.
+If `springboot_loadgen_enable_stress = true`, each run additionally executes `stress-ng` to generate CPU and RAM pressure.
 
 Request-related exported metrics from the load generator:
 
@@ -100,6 +106,11 @@ Request-related exported metrics from the load generator:
 - `springboot_http_requests_last_burst`
 - `springboot_http_requests_last_burst_success`
 - `springboot_http_requests_last_burst_failed`
+- `springboot_loadgen_stress_enabled`
+- `springboot_loadgen_stress_applied`
+- `springboot_loadgen_stress_cpu_workers`
+- `springboot_loadgen_stress_vm_workers`
+- `springboot_loadgen_stress_timeout_seconds`
 
 The default dashboard includes `Spring Boot HTTP Requests (5m)` based on:
 

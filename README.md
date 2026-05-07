@@ -82,6 +82,10 @@ terraform output observability_grafana_url
 - If `create_grafana_dashboard = true`, Terraform imports `dashboards/rehost-observability-dashboard.json` into Grafana.
 - If `enable_local_load_generator = true`, Ansible installs a local load generator (`springboot-loadgen.service` + `springboot-loadgen.timer`) that calls the app endpoint with an irregular burst profile.
 
+### Grafana dashboard snapshot
+
+![Grafana dashboard snapshot for rehost spring boot observability](assets/images/scf_rehost_spring_boot_grafana.png)
+
 ### Local irregular load profile
 
 You can tune the generated load in `env.tfvars`:

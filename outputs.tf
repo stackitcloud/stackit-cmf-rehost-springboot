@@ -21,3 +21,19 @@ output "vm_public_ip" {
 output "application_url" {
   value = "http://${stackit_public_ip.rehost_public_ip.ip}"
 }
+
+output "observability_instance_id" {
+  value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].instance_id : null
+}
+
+output "observability_grafana_url" {
+  value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].grafana_url : null
+}
+
+output "observability_dashboard_url" {
+  value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].dashboard_url : null
+}
+
+output "observability_metrics_push_url" {
+  value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].metrics_push_url : null
+}

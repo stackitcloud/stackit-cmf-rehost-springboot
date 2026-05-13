@@ -206,6 +206,72 @@
         },
         "overrides": []
       }
+    },
+    {
+      "type": "timeseries",
+      "title": "PostgreSQL Connections and Database Size",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__PROM_UID__"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (database) (postgresql_active_connections)",
+          "legendFormat": "{{database}} connections"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (database) (postgresql_database_size_bytes)",
+          "legendFormat": "{{database}} size bytes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "PostgreSQL Commits and Rollbacks (5m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "__PROM_UID__"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (database) (increase(postgresql_xact_commit_total[5m]))",
+          "legendFormat": "{{database}} commits"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (database) (increase(postgresql_xact_rollback_total[5m]))",
+          "legendFormat": "{{database}} rollbacks"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      }
     }
   ]
 }

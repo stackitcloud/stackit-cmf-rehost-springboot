@@ -27,6 +27,81 @@
         update_cache: true
         state: present
 
+    - name: Install PostgreSQL packages
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - postgresql-client
+        state: present
+      when: enable_local_postgresql | default(false) | bool
+
+    - name: Ensure PostgreSQL service is enabled and started
+      ansible.builtin.systemd:
+        name: postgresql
+        enabled: true
+        state: started
+      when: enable_local_postgresql | default(false) | bool
+
+    - name: Check if PostgreSQL role already exists
+      ansible.builtin.command:
+        cmd: sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '{{ postgresql_app_username }}'"
+      register: postgres_role_check
+      changed_when: false
+      when: enable_local_postgresql | default(false) | bool
+
+    - name: Create PostgreSQL application role
+      ansible.builtin.command:
+        cmd: sudo -u postgres psql -c "CREATE ROLE {{ postgresql_app_username }} LOGIN PASSWORD '{{ postgresql_app_password }}'"
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - postgres_role_check.stdout | trim != "1"
+
+    - name: Check if PostgreSQL database already exists
+      ansible.builtin.command:
+        cmd: sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = '{{ postgresql_db_name }}'"
+      register: postgres_db_check
+      changed_when: false
+      when: enable_local_postgresql | default(false) | bool
+
+    - name: Create PostgreSQL application database
+      ansible.builtin.command:
+        cmd: sudo -u postgres psql -c "CREATE DATABASE {{ postgresql_db_name }} OWNER {{ postgresql_app_username }}"
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - postgres_db_check.stdout | trim != "1"
+
+    - name: Ensure PostgreSQL role has privileges on application database
+      ansible.builtin.command:
+        cmd: sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ postgresql_db_name }} TO {{ postgresql_app_username }}"
+      changed_when: false
+      when: enable_local_postgresql | default(false) | bool
+
+    - name: Copy source PostgreSQL dump to VM
+      ansible.builtin.copy:
+        src: "{{ postgresql_source_dump_local_path }}"
+        dest: "{{ postgresql_vm_dump_path }}"
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - postgresql_source_dump_local_path | default("") | length > 0
+
+    - name: Restore source PostgreSQL dump into target database
+      ansible.builtin.command:
+        cmd: >-
+          sudo -u postgres pg_restore
+          --clean
+          --if-exists
+          --no-owner
+          --no-privileges
+          --dbname={{ postgresql_db_name }}
+          {{ postgresql_vm_dump_path }}
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - postgresql_source_dump_local_path | default("") | length > 0
+        - postgresql_restore_after_copy | default(false) | bool
+
     - name: Install node exporter package
       ansible.builtin.apt:
         name:
@@ -86,6 +161,49 @@
           springboot_http_status_code $status
           EOF
       when: enable_node_exporter | default(false) | bool
+
+    - name: Install PostgreSQL metric script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/postgresql-metrics.sh
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          METRICS_DIR="/var/lib/node_exporter/textfile_collector"
+          METRICS_FILE="$METRICS_DIR/postgresql_stats.prom"
+
+          db_name="{{ postgresql_db_name | default('springmusic') }}"
+
+          active_connections=$(sudo -u postgres psql -tAc "SELECT count(*) FROM pg_stat_activity WHERE datname='${db_name}'" 2>/dev/null || echo 0)
+          db_size_bytes=$(sudo -u postgres psql -tAc "SELECT pg_database_size('${db_name}')" 2>/dev/null || echo 0)
+          commits_total=$(sudo -u postgres psql -tAc "SELECT COALESCE(xact_commit,0) FROM pg_stat_database WHERE datname='${db_name}'" 2>/dev/null || echo 0)
+          rollbacks_total=$(sudo -u postgres psql -tAc "SELECT COALESCE(xact_rollback,0) FROM pg_stat_database WHERE datname='${db_name}'" 2>/dev/null || echo 0)
+
+          if ! [[ "$active_connections" =~ ^[0-9]+$ ]]; then
+            active_connections=0
+          fi
+          if ! [[ "$db_size_bytes" =~ ^[0-9]+$ ]]; then
+            db_size_bytes=0
+          fi
+          if ! [[ "$commits_total" =~ ^[0-9]+$ ]]; then
+            commits_total=0
+          fi
+          if ! [[ "$rollbacks_total" =~ ^[0-9]+$ ]]; then
+            rollbacks_total=0
+          fi
+
+          cat > "$METRICS_FILE" <<EOF
+          postgresql_active_connections{database="${db_name}"} $active_connections
+          postgresql_database_size_bytes{database="${db_name}"} $db_size_bytes
+          postgresql_xact_commit_total{database="${db_name}"} $commits_total
+          postgresql_xact_rollback_total{database="${db_name}"} $rollbacks_total
+          EOF
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - enable_node_exporter | default(false) | bool
 
     - name: Install local Spring Boot load generator script
       ansible.builtin.copy:
@@ -255,6 +373,45 @@
           WantedBy=timers.target
       when: enable_node_exporter | default(false) | bool
 
+    - name: Install systemd unit for PostgreSQL metric writer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/postgresql-metrics.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Write PostgreSQL metrics for node exporter textfile collector
+          After=network-online.target postgresql.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/postgresql-metrics.sh
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - enable_node_exporter | default(false) | bool
+
+    - name: Install systemd timer for PostgreSQL metric writer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/postgresql-metrics.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run PostgreSQL metric writer every 30 seconds
+
+          [Timer]
+          OnBootSec=35s
+          OnUnitActiveSec=30s
+          Unit=postgresql-metrics.service
+
+          [Install]
+          WantedBy=timers.target
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - enable_node_exporter | default(false) | bool
+
     - name: Ensure app group exists
       ansible.builtin.group:
         name: "{{ app_group }}"
@@ -298,6 +455,11 @@
           User={{ app_user }}
           Group={{ app_group }}
           WorkingDirectory={{ app_dir }}
+          {% if enable_local_postgresql | default(false) | bool %}
+          Environment=SPRING_DATASOURCE_URL=jdbc:postgresql://127.0.0.1:{{ postgresql_vm_listen_port | default(5432) }}/{{ postgresql_db_name }}
+          Environment=SPRING_DATASOURCE_USERNAME={{ postgresql_app_username }}
+          Environment=SPRING_DATASOURCE_PASSWORD={{ postgresql_app_password }}
+          {% endif %}
           ExecStart=/usr/bin/java -jar {{ app_jar }}
           Restart=always
           RestartSec=5
@@ -329,6 +491,23 @@
         enabled: true
         state: started
       when: enable_node_exporter | default(false) | bool
+
+    - name: Run PostgreSQL metrics writer once
+      ansible.builtin.systemd:
+        name: postgresql-metrics.service
+        state: started
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - enable_node_exporter | default(false) | bool
+
+    - name: Enable and start PostgreSQL metrics timer
+      ansible.builtin.systemd:
+        name: postgresql-metrics.timer
+        enabled: true
+        state: started
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - enable_node_exporter | default(false) | bool
 
     - name: Run local Spring Boot load generator once
       ansible.builtin.systemd:

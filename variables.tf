@@ -156,6 +156,55 @@ variable "springboot_app_port" {
   default     = 8080
 }
 
+variable "enable_local_postgresql" {
+  type        = bool
+  description = "Install and configure PostgreSQL on the target VM for the Spring Boot app"
+  default     = false
+}
+
+variable "postgresql_vm_listen_port" {
+  type        = number
+  description = "PostgreSQL port used by the Spring Boot datasource configuration"
+  default     = 5432
+}
+
+variable "postgresql_db_name" {
+  type        = string
+  description = "PostgreSQL database name used by the application"
+  default     = "springmusic"
+}
+
+variable "postgresql_app_username" {
+  type        = string
+  description = "PostgreSQL application username created on the VM"
+  default     = "springmusic"
+}
+
+variable "postgresql_app_password" {
+  type        = string
+  description = "PostgreSQL application password created on the VM"
+  default     = "change-me"
+  sensitive   = true
+}
+
+variable "postgresql_source_dump_local_path" {
+  type        = string
+  description = "Optional local path to a PostgreSQL dump file that should be copied to the VM"
+  default     = ""
+}
+
+variable "postgresql_vm_dump_path" {
+  type        = string
+  description = "Target dump file path on the VM"
+  default     = "/tmp/source-postgresql.dump"
+}
+
+variable "postgresql_restore_after_copy" {
+  type        = bool
+  description = "When true and a dump file is provided, restore the dump into the target database"
+  default     = false
+}
+
 variable "enable_local_load_generator" {
   type        = bool
   description = "Enable local irregular request generation against the Spring Boot app from within the VM"

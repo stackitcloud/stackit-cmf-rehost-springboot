@@ -22,6 +22,14 @@ output "application_url" {
   value = "http://${stackit_public_ip.rehost_public_ip.ip}"
 }
 
+output "postgresql_jdbc_url" {
+  value = var.enable_local_postgresql ? "jdbc:postgresql://${stackit_public_ip.rehost_public_ip.ip}:${var.postgresql_vm_listen_port}/${var.postgresql_db_name}" : null
+}
+
+output "postgresql_dump_source_path" {
+  value = var.enable_local_postgresql && var.postgresql_source_dump_local_path != "" ? var.postgresql_source_dump_local_path : null
+}
+
 output "observability_instance_id" {
   value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].instance_id : null
 }

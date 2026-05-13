@@ -12,6 +12,9 @@ Runnable Rehost automation example for STACKIT using Terraform and Ansible.
 The repository includes a ready-to-deploy sample Spring Boot artifact at `ansible/files/springboot-app.jar`.
 By default, Terraform/Ansible deploy this artifact via `jar_local_path = "ansible/files/springboot-app.jar"`.
 
+The example can also install a VM-local PostgreSQL and wire Spring Boot to that database when
+`enable_local_postgresql = true`.
+
 ## Prerequisites
 
 - Terraform `>= 1.5`
@@ -63,6 +66,18 @@ Optional (only if your app exposes Prometheus metrics):
 Optional (to generate local demo traffic directly from the VM):
 
 - `enable_local_load_generator = true`
+
+Optional (to enable VM-local PostgreSQL for the app):
+
+- `enable_local_postgresql = true`
+- `postgresql_db_name = "springmusic"`
+- `postgresql_app_username = "springmusic"`
+- `postgresql_app_password = "..."`
+
+Optional (to import source data during provisioning):
+
+- `postgresql_source_dump_local_path = "/absolute/path/to/source.dump"`
+- `postgresql_restore_after_copy = true`
 
 4. After apply:
 
@@ -126,6 +141,29 @@ Security note: with `expose_node_exporter_port = true`, port `9100` is exposed v
 
 - Default artifact path: `ansible/files/springboot-app.jar`
 - To deploy a different app, replace this file or set `jar_local_path` in `env.tfvars`.
+
+## Rehost data migration path (source PostgreSQL -> target VM PostgreSQL)
+
+Use this flow when `enable_local_postgresql = true`.
+
+1. On the source system, export data:
+
+```bash
+pg_dump --format=custom --no-owner --no-privileges --dbname=<source-db> --file=/tmp/source.dump
+```
+
+2. Copy the dump file to your Terraform execution host.
+3. Set in `env.tfvars`:
+
+```hcl
+enable_local_postgresql           = true
+postgresql_source_dump_local_path = "/tmp/source.dump"
+postgresql_restore_after_copy     = true
+```
+
+4. Run `terraform apply -var-file=env.tfvars`.
+
+Ansible copies the dump to the target VM and restores it with `pg_restore` into `postgresql_db_name`.
 
 ## Destroy
 

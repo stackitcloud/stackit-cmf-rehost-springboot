@@ -79,6 +79,29 @@ Optional (to import source data during provisioning):
 - `postgresql_source_dump_local_path = "/absolute/path/to/source.dump"`
 - `postgresql_restore_after_copy = true`
 
+## Common flag wrapper
+
+To use the common CMF flags, copy and adjust:
+
+```bash
+cp flags.env.example flags.env
+```
+
+Then run:
+
+```bash
+./scripts/apply_with_common_flags.sh flags.env env.tfvars
+```
+
+Common flags:
+
+- `setup_project`
+- `setup_observability`
+- `setup_database`
+- `setup_workload`
+- `setup_loadgen`
+- `setup_dns`
+
 4. After apply:
 
 ```bash

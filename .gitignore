@@ -3,7 +3,14 @@
 terraform.tfstate
 terraform.tfstate.*
 crash.log
+crash.*.log
 *.auto.tfvars
+*.tfvars
+*.tfvars.json
 ansible/inventory.ini
 env.tfvars
 tfplan
+tfplan*
+.DS_Store
+.idea/
+.vscode/

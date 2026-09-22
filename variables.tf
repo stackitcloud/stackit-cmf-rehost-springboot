@@ -57,6 +57,18 @@ variable "server_name" {
   default = "rehost-springboot-vm"
 }
 
+variable "boot_volume_size" {
+  type        = number
+  description = "Boot volume size in GB"
+  default     = 60
+}
+
+variable "boot_volume_performance_class" {
+  type        = string
+  description = "STACKIT performance class for the server boot volume"
+  default     = "storage_premium_perf6"
+}
+
 variable "machine_type" {
   type        = string
   description = "STACKIT flavor id"
@@ -67,6 +79,12 @@ variable "image_id" {
   type        = string
   description = "Boot image id"
   default     = ""
+}
+
+variable "image_name" {
+  type        = string
+  description = "Exact STACKIT image name used when image auto-discovery is enabled"
+  default     = "Ubuntu 22.04"
 }
 
 variable "auto_discover_compute_defaults" {
@@ -85,9 +103,35 @@ variable "private_ssh_key_path" {
   default = "~/.ssh/id_rsa"
 }
 
+variable "key_pair_name" {
+  type        = string
+  description = "Optional global STACKIT key pair name; defaults to a project-specific name"
+  default     = ""
+}
+
 variable "ssh_user" {
   type    = string
   default = "ubuntu"
+}
+
+variable "ssh_allowed_cidr" {
+  type        = string
+  description = "CIDR allowed to reach SSH on the VM. Use the operator's current public IP as a /32; leave empty only for short-lived diagnostics."
+
+  validation {
+    condition     = var.ssh_allowed_cidr == "" || can(cidrnetmask(var.ssh_allowed_cidr))
+    error_message = "ssh_allowed_cidr must be empty or a valid IPv4 CIDR."
+  }
+}
+
+variable "app_allowed_cidr" {
+  type        = string
+  description = "CIDR allowed to connect directly to the Spring Boot port"
+
+  validation {
+    condition     = can(cidrnetmask(var.app_allowed_cidr))
+    error_message = "app_allowed_cidr must be a valid IPv4 CIDR."
+  }
 }
 
 variable "jar_local_path" {
@@ -100,6 +144,41 @@ variable "run_ansible" {
   type        = bool
   description = "Whether terraform should execute ansible-playbook after provisioning"
   default     = true
+}
+
+variable "enable_server_backup" {
+  type        = bool
+  description = "Enable STACKIT Server Backup and a recurring backup schedule for the VM boot volume"
+  default     = false
+}
+
+variable "server_backup_schedule_name" {
+  type        = string
+  description = "Name of the STACKIT Server Backup schedule"
+  default     = "rehost-springboot-daily"
+}
+
+variable "server_backup_name" {
+  type        = string
+  description = "Name assigned to backups created by the recurring schedule"
+  default     = "rehost-springboot"
+}
+
+variable "server_backup_retention_days" {
+  type        = number
+  description = "Retention period in days for scheduled server backups"
+  default     = 14
+
+  validation {
+    condition     = var.server_backup_retention_days >= 1 && floor(var.server_backup_retention_days) == var.server_backup_retention_days
+    error_message = "server_backup_retention_days must be a positive integer."
+  }
+}
+
+variable "server_backup_schedule_rrule" {
+  type        = string
+  description = "RFC 5545 recurrence rule for the STACKIT Server Backup schedule"
+  default     = "DTSTART;TZID=Europe/Berlin:20200101T020000 RRULE:FREQ=DAILY;INTERVAL=1"
 }
 
 variable "enable_observability" {
@@ -123,7 +202,7 @@ variable "observability_plan_name" {
 variable "observability_scrape_interval" {
   type        = string
   description = "Scrape interval used for Observability scrape jobs"
-  default     = "30s"
+  default     = "2m"
 }
 
 variable "observability_scrape_timeout" {
@@ -172,19 +251,34 @@ variable "postgresql_db_name" {
   type        = string
   description = "PostgreSQL database name used by the application"
   default     = "springmusic"
+
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_]{0,62}$", var.postgresql_db_name))
+    error_message = "postgresql_db_name must be a valid unquoted PostgreSQL identifier."
+  }
 }
 
 variable "postgresql_app_username" {
   type        = string
   description = "PostgreSQL application username created on the VM"
   default     = "springmusic"
+
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_]{0,62}$", var.postgresql_app_username))
+    error_message = "postgresql_app_username must be a valid unquoted PostgreSQL identifier."
+  }
 }
 
 variable "postgresql_app_password" {
   type        = string
   description = "PostgreSQL application password created on the VM"
-  default     = "change-me"
   sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = var.postgresql_app_password == "" || can(regex("^[A-Za-z0-9_@%+=:,./-]{16,}$", var.postgresql_app_password))
+    error_message = "postgresql_app_password must be empty or contain at least 16 supported characters."
+  }
 }
 
 variable "postgresql_source_dump_local_path" {
@@ -197,6 +291,34 @@ variable "postgresql_vm_dump_path" {
   type        = string
   description = "Target dump file path on the VM"
   default     = "/tmp/source-postgresql.dump"
+}
+
+variable "postgresql_vm_rollback_dump_path" {
+  type        = string
+  description = "Target path for the pre-restore rollback dump on the VM"
+  default     = "/var/backups/springmusic/pre-restore.dump"
+}
+
+variable "postgresql_expected_album_count" {
+  type        = number
+  description = "Expected number of rows in public.album after restore"
+  default     = 0
+
+  validation {
+    condition     = var.postgresql_expected_album_count >= 0 && floor(var.postgresql_expected_album_count) == var.postgresql_expected_album_count
+    error_message = "postgresql_expected_album_count must be a non-negative integer."
+  }
+}
+
+variable "postgresql_expected_album_fingerprint" {
+  type        = string
+  description = "Expected MD5 fingerprint of canonicalized public.album rows after restore"
+  default     = ""
+
+  validation {
+    condition     = var.postgresql_expected_album_fingerprint == "" || can(regex("^[0-9a-f]{32}$", var.postgresql_expected_album_fingerprint))
+    error_message = "postgresql_expected_album_fingerprint must be empty or a lowercase MD5 value."
+  }
 }
 
 variable "postgresql_restore_after_copy" {

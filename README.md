@@ -72,7 +72,12 @@ Optional (to enable VM-local PostgreSQL for the app):
 - `enable_local_postgresql = true`
 - `postgresql_db_name = "springmusic"`
 - `postgresql_app_username = "springmusic"`
-- `postgresql_app_password = "..."`
+
+Pass the database password outside the variable file:
+
+```bash
+export TF_VAR_postgresql_app_password='<at-least-16-characters>'
+```
 
 Optional (to import source data during provisioning):
 
@@ -169,29 +174,119 @@ Security note: with `expose_node_exporter_port = true`, port `9100` is exposed v
 
 Use this flow when `enable_local_postgresql = true`.
 
-1. On the source system, export data:
+### Reproducible sample source
+
+Install PostgreSQL server and client tools, then create and validate the included sample source:
+
+```bash
+./scripts/create_source_dump.sh
+./scripts/validate_source_dump.sh
+```
+
+The first command starts an isolated temporary PostgreSQL cluster, loads
+`migration/source/springmusic.sql`, and writes these ignored runtime artifacts:
+
+- `artifacts/source-postgresql.dump`
+- `artifacts/source-postgresql.dump.sha256`
+- `artifacts/source-postgresql.manifest`
+
+The second command restores the dump into another empty temporary cluster and compares its row count and canonical album fingerprint with the manifest.
+
+### Existing PostgreSQL source
+
+On the source system, export data:
 
 ```bash
 pg_dump --format=custom --no-owner --no-privileges --dbname=<source-db> --file=/tmp/source.dump
 ```
 
-2. Copy the dump file to your Terraform execution host.
-3. Set in `env.tfvars`:
+Copy the dump file to your Terraform execution host and record a checksum, expected row count, and a workload-specific data fingerprint.
+
+### Restore to STACKIT
+
+Set in `env.tfvars`:
 
 ```hcl
 enable_local_postgresql           = true
-postgresql_source_dump_local_path = "/tmp/source.dump"
+postgresql_source_dump_local_path = "artifacts/source-postgresql.dump"
 postgresql_restore_after_copy     = true
+postgresql_expected_album_count   = 8
+postgresql_expected_album_fingerprint = "<value-from-source-postgresql.manifest>"
 ```
 
-4. Run `terraform apply -var-file=env.tfvars`.
+Run a reviewed plan and apply it:
 
-Ansible copies the dump to the target VM and restores it with `pg_restore` into `postgresql_db_name`.
+```bash
+terraform plan -var-file=env.tfvars -out=tfplan
+terraform apply tfplan
+./scripts/validate_migration.sh
+./scripts/validate_deployment.sh
+```
+
+The restore stops Spring Boot, creates `/var/backups/springmusic/pre-restore.dump`, and records its source-dump hash, row count, and fingerprint. Retrying the same source-dump generation preserves this rollback point; a different dump archives it and creates a new one. The source is restored in one transaction with ownership assigned to the application role. Spring Boot starts only after source evidence passes; a restore or validation failure leaves it stopped. Rollback files are owned by `postgres` with mode `0600`.
+
+Verify the rollback artifact without changing the target database by restoring it into a separate temporary database before cutover. Retain the source and rollback dump until the rollback window closes.
+
+### Rehearsal, cutover, and rollback
+
+Run the migration rehearsal first. It restores the source dump into a temporary database on the target VM, validates the row count and fingerprint, and removes the temporary database without changing the application database:
+
+```bash
+./scripts/run_migration_rehearsal.sh
+```
+
+Execute the cutover only after reviewing the source evidence and Terraform plan:
+
+```bash
+./scripts/run_cutover.sh --confirm
+```
+
+The cutover script forces replacement of the Ansible orchestration resource because Terraform cannot detect database data drift. It requires a fully available VM backup no older than 24 hours when Server Backup is enabled, rejects every plan change except replacement of that exact resource, applies the saved plan, validates the migrated data and application, and requires a final no-op plan. Override the age gate only through the reviewed `SERVER_BACKUP_MAX_AGE_HOURS` environment variable.
+
+Verify the pre-restore rollback dump in an isolated temporary database:
+
+```bash
+./scripts/verify_rollback.sh
+```
+
+To perform a database rollback during the agreed rollback window, run:
+
+```bash
+./scripts/rollback_postgresql.sh --confirm
+```
+
+The rollback workflow preserves the current target database before restoring the original pre-restore dump. Each workflow writes machine-readable evidence to `artifacts/evidence/<timestamp>-<mode>/evidence.env`.
+
+## Server backup
+
+Set `enable_server_backup = true` to enable STACKIT Server Backup and a daily schedule for the VM boot volume. The default schedule runs at 02:00 Europe/Berlin and retains backups for 14 days; both values are configurable in `env.tfvars`.
+
+The schedule protects the complete boot volume in addition to the database-specific rollback dump. Creating and listing backups has been validated against a real STACKIT server. A restore is an in-place, disruptive operation and must be rehearsed in a separate disaster-recovery environment before relying on it for production recovery.
+
+## Ingress restrictions
+
+Set `ssh_allowed_cidr` and `app_allowed_cidr` to source addresses observed on the target path. Corporate proxies or target-dependent NAT can make public IP lookup services report a different address. In the validated environment, SSH and HTTP used different `/32` addresses.
+
+Node exporter ingress is generated from the official STACKIT public service ranges when Observability and the exporter are enabled.
 
 ## Destroy
 
 ```bash
 terraform destroy -var-file=env.tfvars
+```
+
+## Local validation
+
+Run the Terraform, shell, and Ansible checks before creating a plan:
+
+```bash
+./scripts/check.sh
+```
+
+Validate a deployed VM after apply:
+
+```bash
+./scripts/validate_deployment.sh
 ```
 
 ## Notes

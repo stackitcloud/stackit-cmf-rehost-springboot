@@ -18,12 +18,44 @@ output "vm_public_ip" {
   value = stackit_public_ip.rehost_public_ip.ip
 }
 
+output "vm_server_id" {
+  value = stackit_server.rehost_vm.server_id
+}
+
+output "region" {
+  value = var.region
+}
+
 output "application_url" {
-  value = "http://${stackit_public_ip.rehost_public_ip.ip}"
+  value = "http://${stackit_public_ip.rehost_public_ip.ip}:${var.springboot_app_port}"
+}
+
+output "server_backup_enabled" {
+  value = var.enable_server_backup ? stackit_server_backup_enable.rehost[0].enabled : false
+}
+
+output "server_backup_schedule_id" {
+  value = var.enable_server_backup ? stackit_server_backup_schedule.rehost[0].backup_schedule_id : null
 }
 
 output "postgresql_jdbc_url" {
-  value = var.enable_local_postgresql ? "jdbc:postgresql://${stackit_public_ip.rehost_public_ip.ip}:${var.postgresql_vm_listen_port}/${var.postgresql_db_name}" : null
+  value = var.enable_local_postgresql ? "jdbc:postgresql://127.0.0.1:${var.postgresql_vm_listen_port}/${var.postgresql_db_name}" : null
+}
+
+output "local_postgresql_enabled" {
+  value = var.enable_local_postgresql
+}
+
+output "postgresql_database_name" {
+  value = var.postgresql_db_name
+}
+
+output "node_exporter_enabled" {
+  value = var.enable_observability && var.enable_node_exporter
+}
+
+output "node_exporter_port" {
+  value = var.node_exporter_port
 }
 
 output "postgresql_dump_source_path" {

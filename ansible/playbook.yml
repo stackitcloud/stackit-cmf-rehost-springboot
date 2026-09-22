@@ -8,8 +8,19 @@
     app_group: spring
     app_dir: /opt/springboot
     app_jar: /opt/springboot/app.jar
+    postgresql_app_password: "{{ lookup('ansible.builtin.env', 'POSTGRESQL_APP_PASSWORD') }}"
 
   pre_tasks:
+    - name: Validate PostgreSQL password input
+      ansible.builtin.assert:
+        that:
+          - postgresql_app_password | length >= 16
+          - postgresql_app_password is match('^[A-Za-z0-9_@%+=:,./-]+$')
+          - postgresql_app_username is match('^[a-z_][a-z0-9_]{0,62}$')
+          - postgresql_db_name is match('^[a-z_][a-z0-9_]{0,62}$')
+        fail_msg: PostgreSQL credentials must use supported characters and identifiers.
+      when: enable_local_postgresql | default(false) | bool
+
     - name: Wait for SSH to become reachable
       ansible.builtin.wait_for_connection:
         timeout: 300
@@ -52,6 +63,7 @@
     - name: Create PostgreSQL application role
       ansible.builtin.command:
         cmd: sudo -u postgres psql -c "CREATE ROLE {{ postgresql_app_username }} LOGIN PASSWORD '{{ postgresql_app_password }}'"
+      no_log: true
       when:
         - enable_local_postgresql | default(false) | bool
         - postgres_role_check.stdout | trim != "1"
@@ -86,21 +98,6 @@
       when:
         - enable_local_postgresql | default(false) | bool
         - postgresql_source_dump_local_path | default("") | length > 0
-
-    - name: Restore source PostgreSQL dump into target database
-      ansible.builtin.command:
-        cmd: >-
-          sudo -u postgres pg_restore
-          --clean
-          --if-exists
-          --no-owner
-          --no-privileges
-          --dbname={{ postgresql_db_name }}
-          {{ postgresql_vm_dump_path }}
-      when:
-        - enable_local_postgresql | default(false) | bool
-        - postgresql_source_dump_local_path | default("") | length > 0
-        - postgresql_restore_after_copy | default(false) | bool
 
     - name: Install node exporter package
       ansible.builtin.apt:
@@ -455,10 +452,9 @@
           User={{ app_user }}
           Group={{ app_group }}
           WorkingDirectory={{ app_dir }}
+          Environment=SERVER_PORT={{ springboot_app_port | default(8080) }}
           {% if enable_local_postgresql | default(false) | bool %}
-          Environment=SPRING_DATASOURCE_URL=jdbc:postgresql://127.0.0.1:{{ postgresql_vm_listen_port | default(5432) }}/{{ postgresql_db_name }}
-          Environment=SPRING_DATASOURCE_USERNAME={{ postgresql_app_username }}
-          Environment=SPRING_DATASOURCE_PASSWORD={{ postgresql_app_password }}
+          EnvironmentFile=/etc/springboot.env
           {% endif %}
           ExecStart=/usr/bin/java -jar {{ app_jar }}
           Restart=always
@@ -468,9 +464,245 @@
           [Install]
           WantedBy=multi-user.target
 
+    - name: Install Spring Boot database environment
+      ansible.builtin.copy:
+        dest: /etc/springboot.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          SPRING_DATASOURCE_URL=jdbc:postgresql://127.0.0.1:{{ postgresql_vm_listen_port | default(5432) }}/{{ postgresql_db_name }}
+          SPRING_DATASOURCE_USERNAME={{ postgresql_app_username }}
+          SPRING_DATASOURCE_PASSWORD={{ postgresql_app_password }}
+      no_log: true
+      when: enable_local_postgresql | default(false) | bool
+
     - name: Reload systemd
       ansible.builtin.systemd:
         daemon_reload: true
+
+    - name: Restore source PostgreSQL database
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - postgresql_source_dump_local_path | default("") | length > 0
+        - postgresql_restore_after_copy | default(false) | bool
+      block:
+        - name: Stop Spring Boot service for database restore
+          ansible.builtin.systemd:
+            name: springboot.service
+            state: stopped
+
+        - name: Create PostgreSQL rollback directory
+          ansible.builtin.file:
+            path: "{{ postgresql_vm_rollback_dump_path | dirname }}"
+            state: directory
+            owner: postgres
+            group: postgres
+            mode: "0700"
+
+        - name: Calculate the source dump migration identity
+          ansible.builtin.stat:
+            path: "{{ postgresql_vm_dump_path }}"
+            checksum_algorithm: sha256
+          register: postgresql_source_dump
+
+        - name: Validate the source dump migration identity
+          ansible.builtin.assert:
+            that:
+              - postgresql_source_dump.stat.exists
+              - postgresql_source_dump.stat.checksum is match('^[0-9a-f]{64}$')
+            fail_msg: The source PostgreSQL dump is missing or has no valid SHA-256 checksum.
+
+        - name: Check for an existing PostgreSQL rollback dump
+          ansible.builtin.stat:
+            path: "{{ postgresql_vm_rollback_dump_path }}"
+          register: existing_rollback_dump
+
+        - name: Check for existing PostgreSQL rollback evidence
+          ansible.builtin.stat:
+            path: "{{ postgresql_vm_rollback_dump_path }}.env"
+          register: existing_rollback_evidence
+
+        - name: Read the existing PostgreSQL rollback generation
+          ansible.builtin.command:
+            argv:
+              - sed
+              - -n
+              - s/^migration_id=//p
+              - "{{ postgresql_vm_rollback_dump_path }}.env"
+          register: existing_rollback_migration_id
+          changed_when: false
+          when: existing_rollback_evidence.stat.exists
+
+        - name: Decide whether to refresh the PostgreSQL rollback point
+          ansible.builtin.set_fact:
+            refresh_postgresql_rollback: >-
+              {{
+                not existing_rollback_dump.stat.exists or
+                not existing_rollback_evidence.stat.exists or
+                existing_rollback_migration_id.stdout | default('') | trim != postgresql_source_dump.stat.checksum
+              }}
+
+        - name: Archive the previous PostgreSQL rollback dump
+          ansible.builtin.copy:
+            src: "{{ postgresql_vm_rollback_dump_path }}"
+            dest: "{{ postgresql_vm_rollback_dump_path }}.previous"
+            remote_src: true
+            owner: postgres
+            group: postgres
+            mode: "0600"
+          when:
+            - refresh_postgresql_rollback | bool
+            - existing_rollback_dump.stat.exists
+
+        - name: Archive the previous PostgreSQL rollback evidence
+          ansible.builtin.copy:
+            src: "{{ postgresql_vm_rollback_dump_path }}.env"
+            dest: "{{ postgresql_vm_rollback_dump_path }}.env.previous"
+            remote_src: true
+            owner: postgres
+            group: postgres
+            mode: "0600"
+          when:
+            - refresh_postgresql_rollback | bool
+            - existing_rollback_evidence.stat.exists
+
+        - name: Read pre-restore album count
+          ansible.builtin.command:
+            argv:
+              - sudo
+              - -u
+              - postgres
+              - psql
+              - --tuples-only
+              - --no-align
+              - "--dbname={{ postgresql_db_name }}"
+              - --command
+              - SELECT count(*) FROM public.album;
+          register: pre_restore_album_count
+          changed_when: false
+          when: refresh_postgresql_rollback | bool
+
+        - name: Read pre-restore album fingerprint
+          ansible.builtin.command:
+            argv:
+              - sudo
+              - -u
+              - postgres
+              - psql
+              - --tuples-only
+              - --no-align
+              - "--dbname={{ postgresql_db_name }}"
+              - --command
+              - "SELECT md5(string_agg(concat_ws('|', id, album_id, artist, genre, release_year, title, track_count), E'\\n' ORDER BY id)) FROM public.album;"
+          register: pre_restore_album_fingerprint
+          changed_when: false
+          when: refresh_postgresql_rollback | bool
+
+        - name: Create pre-restore PostgreSQL rollback dump
+          ansible.builtin.command:
+            argv:
+              - sudo
+              - -u
+              - postgres
+              - pg_dump
+              - --format=custom
+              - --no-owner
+              - --no-privileges
+              - "--dbname={{ postgresql_db_name }}"
+              - "--file={{ postgresql_vm_rollback_dump_path }}"
+          when: refresh_postgresql_rollback | bool
+
+        - name: Protect PostgreSQL rollback dump
+          ansible.builtin.file:
+            path: "{{ postgresql_vm_rollback_dump_path }}"
+            owner: postgres
+            group: postgres
+            mode: "0600"
+
+        - name: Record PostgreSQL rollback evidence
+          ansible.builtin.copy:
+            dest: "{{ postgresql_vm_rollback_dump_path }}.env"
+            owner: postgres
+            group: postgres
+            mode: "0600"
+            content: |
+              migration_id={{ postgresql_source_dump.stat.checksum }}
+              row_count={{ pre_restore_album_count.stdout | trim }}
+              album_fingerprint={{ pre_restore_album_fingerprint.stdout | trim }}
+          when: refresh_postgresql_rollback | bool
+
+        - name: Restore source PostgreSQL dump into target database
+          ansible.builtin.command:
+            argv:
+              - sudo
+              - -u
+              - postgres
+              - pg_restore
+              - --clean
+              - --if-exists
+              - --no-owner
+              - --no-privileges
+              - "--role={{ postgresql_app_username }}"
+              - --single-transaction
+              - "--dbname={{ postgresql_db_name }}"
+              - "{{ postgresql_vm_dump_path }}"
+
+        - name: Read restored album count
+          ansible.builtin.command:
+            argv:
+              - sudo
+              - -u
+              - postgres
+              - psql
+              - --tuples-only
+              - --no-align
+              - "--dbname={{ postgresql_db_name }}"
+              - --command
+              - SELECT count(*) FROM public.album;
+          register: restored_album_count
+          changed_when: false
+
+        - name: Read restored album fingerprint
+          ansible.builtin.command:
+            argv:
+              - sudo
+              - -u
+              - postgres
+              - psql
+              - --tuples-only
+              - --no-align
+              - "--dbname={{ postgresql_db_name }}"
+              - --command
+              - "SELECT md5(string_agg(concat_ws('|', id, album_id, artist, genre, release_year, title, track_count), E'\\n' ORDER BY id)) FROM public.album;"
+          register: restored_album_fingerprint
+          changed_when: false
+
+        - name: Validate restored PostgreSQL data
+          ansible.builtin.assert:
+            that:
+              - restored_album_count.stdout | trim == postgresql_expected_album_count | string
+              - restored_album_fingerprint.stdout | trim == postgresql_expected_album_fingerprint
+            fail_msg: Restored PostgreSQL data does not match the source manifest.
+      rescue:
+        - name: Keep Spring Boot stopped after a failed database restore
+          ansible.builtin.systemd:
+            name: springboot.service
+            state: stopped
+
+        - name: Fail after preserving the stopped target
+          ansible.builtin.fail:
+            msg: Database restore or validation failed; Spring Boot remains stopped.
+
+    - name: Start Spring Boot service after successful database restore
+      ansible.builtin.systemd:
+        name: springboot.service
+        enabled: true
+        state: started
+      when:
+        - enable_local_postgresql | default(false) | bool
+        - postgresql_source_dump_local_path | default("") | length > 0
+        - postgresql_restore_after_copy | default(false) | bool
 
     - name: Enable and restart node exporter
       ansible.builtin.systemd:

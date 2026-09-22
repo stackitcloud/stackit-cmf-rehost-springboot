@@ -29,7 +29,7 @@ data "stackit_image_v2" "ubuntu" {
 
   project_id = local.effective_project_id
   region     = var.region
-  name_regex = "(?i)ubuntu.*22\\.04"
+  name       = var.image_name
 }
 
 data "stackit_machine_type" "default" {
@@ -37,14 +37,17 @@ data "stackit_machine_type" "default" {
 
   project_id     = local.effective_project_id
   region         = var.region
-  filter         = "vcpus == 2 && ram >= 4096"
+  filter         = "vcpus == 2 && ram >= 4096 && !contains(description, 'DEPRECATED') && !contains(description, 'DontShowInPortal')"
   sort_ascending = true
 }
 
 locals {
-  selected_image_id     = var.image_id != "" ? var.image_id : (var.auto_discover_compute_defaults ? data.stackit_image_v2.ubuntu[0].image_id : "")
-  selected_machine_type = var.machine_type != "" ? var.machine_type : (var.auto_discover_compute_defaults ? data.stackit_machine_type.default[0].name : "")
+  selected_image_id      = var.image_id != "" ? var.image_id : (var.auto_discover_compute_defaults ? data.stackit_image_v2.ubuntu[0].image_id : "")
+  selected_machine_type  = var.machine_type != "" ? var.machine_type : (var.auto_discover_compute_defaults ? data.stackit_machine_type.default[0].name : "")
+  selected_key_pair_name = var.key_pair_name != "" ? var.key_pair_name : "${var.server_name}-${substr(local.effective_project_id, 0, 8)}-key"
 }
+
+data "stackit_public_ip_ranges" "stackit_services" {}
 
 resource "stackit_security_group" "rehost_sg" {
   project_id = local.effective_project_id
@@ -62,6 +65,7 @@ resource "stackit_security_group_rule" "ssh" {
     min = 22
     max = 22
   }
+  ip_range = var.ssh_allowed_cidr != "" ? var.ssh_allowed_cidr : null
 }
 
 resource "stackit_security_group_rule" "http" {
@@ -72,13 +76,14 @@ resource "stackit_security_group_rule" "http" {
     name = "tcp"
   }
   port_range = {
-    min = 80
-    max = 80
+    min = var.springboot_app_port
+    max = var.springboot_app_port
   }
+  ip_range = var.app_allowed_cidr
 }
 
 resource "stackit_security_group_rule" "node_exporter" {
-  count = var.enable_observability && var.enable_node_exporter && var.expose_node_exporter_port ? 1 : 0
+  for_each = var.enable_observability && var.enable_node_exporter && var.expose_node_exporter_port ? toset(data.stackit_public_ip_ranges.stackit_services.cidr_list) : toset([])
 
   project_id        = local.effective_project_id
   security_group_id = stackit_security_group.rehost_sg.security_group_id
@@ -90,6 +95,7 @@ resource "stackit_security_group_rule" "node_exporter" {
     min = var.node_exporter_port
     max = var.node_exporter_port
   }
+  ip_range = each.value
 }
 
 resource "stackit_network" "rehost_net" {
@@ -110,21 +116,8 @@ resource "stackit_public_ip" "rehost_public_ip" {
 }
 
 resource "stackit_key_pair" "rehost_key" {
-  name       = "rehost-key"
-  public_key = chomp(file(var.public_ssh_key_path))
-}
-
-resource "stackit_volume" "rehost_boot" {
-  project_id        = local.effective_project_id
-  name              = "rehost-boot"
-  availability_zone = var.availability_zone
-  size              = 60
-  performance_class = "storage_premium_perf6"
-
-  source = {
-    id   = local.selected_image_id
-    type = "image"
-  }
+  name       = local.selected_key_pair_name
+  public_key = chomp(file(pathexpand(var.public_ssh_key_path)))
 }
 
 resource "stackit_server" "rehost_vm" {
@@ -134,13 +127,42 @@ resource "stackit_server" "rehost_vm" {
   network_interfaces = [stackit_network_interface.rehost_nic.network_interface_id]
 
   boot_volume = {
-    source_type = "volume"
-    source_id   = stackit_volume.rehost_boot.volume_id
+    source_type           = "image"
+    source_id             = local.selected_image_id
+    size                  = var.boot_volume_size
+    performance_class     = var.boot_volume_performance_class
+    delete_on_termination = true
   }
 
   availability_zone = var.availability_zone
   machine_type      = local.selected_machine_type
   keypair_name      = stackit_key_pair.rehost_key.name
+}
+
+resource "stackit_server_backup_enable" "rehost" {
+  count = var.enable_server_backup ? 1 : 0
+
+  project_id = local.effective_project_id
+  region     = var.region
+  server_id  = stackit_server.rehost_vm.server_id
+}
+
+resource "stackit_server_backup_schedule" "rehost" {
+  count = var.enable_server_backup ? 1 : 0
+
+  project_id = local.effective_project_id
+  region     = var.region
+  server_id  = stackit_server.rehost_vm.server_id
+  name       = var.server_backup_schedule_name
+  enabled    = true
+  rrule      = var.server_backup_schedule_rrule
+  backup_properties = {
+    name             = var.server_backup_name
+    retention_period = var.server_backup_retention_days
+    volume_ids       = [stackit_server.rehost_vm.boot_volume.id]
+  }
+
+  depends_on = [stackit_server_backup_enable.rehost]
 }
 
 resource "stackit_observability_instance" "rehost_obs" {
@@ -208,7 +230,6 @@ resource "terraform_data" "ansible_inventory" {
     tostring(var.postgresql_vm_listen_port),
     var.postgresql_db_name,
     var.postgresql_app_username,
-    var.postgresql_app_password,
     var.postgresql_source_dump_local_path,
     var.postgresql_vm_dump_path,
     tostring(var.postgresql_restore_after_copy),
@@ -219,7 +240,7 @@ resource "terraform_data" "ansible_inventory" {
     command = <<-EOT
       cat > ${path.module}/ansible/inventory.ini <<'EOF'
       [rehost]
-      ${stackit_public_ip.rehost_public_ip.ip} ansible_user=${var.ssh_user} ansible_ssh_private_key_file=${pathexpand(var.private_ssh_key_path)} ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' jar_local_path=${abspath(var.jar_local_path)} enable_node_exporter=${var.enable_observability && var.enable_node_exporter} node_exporter_port=${var.node_exporter_port} springboot_app_port=${var.springboot_app_port} enable_local_load_generator=${var.enable_local_load_generator} springboot_loadgen_target_path=${var.springboot_loadgen_target_path} springboot_loadgen_base_interval_seconds=${var.springboot_loadgen_base_interval_seconds} springboot_loadgen_randomized_delay_seconds=${var.springboot_loadgen_randomized_delay_seconds} springboot_loadgen_burst_min_requests=${var.springboot_loadgen_burst_min_requests} springboot_loadgen_burst_max_requests=${var.springboot_loadgen_burst_max_requests} springboot_loadgen_enable_stress=${var.springboot_loadgen_enable_stress} springboot_loadgen_stress_cpu_workers=${var.springboot_loadgen_stress_cpu_workers} springboot_loadgen_stress_vm_workers=${var.springboot_loadgen_stress_vm_workers} springboot_loadgen_stress_vm_bytes=${var.springboot_loadgen_stress_vm_bytes} springboot_loadgen_stress_timeout_seconds=${var.springboot_loadgen_stress_timeout_seconds} enable_local_postgresql=${var.enable_local_postgresql} postgresql_vm_listen_port=${var.postgresql_vm_listen_port} postgresql_db_name=${var.postgresql_db_name} postgresql_app_username=${var.postgresql_app_username} postgresql_app_password='${var.postgresql_app_password}' postgresql_source_dump_local_path=${var.postgresql_source_dump_local_path != "" && var.postgresql_source_dump_local_path != "." ? abspath(var.postgresql_source_dump_local_path) : ""} postgresql_vm_dump_path=${var.postgresql_vm_dump_path} postgresql_restore_after_copy=${var.postgresql_restore_after_copy}
+      ${stackit_public_ip.rehost_public_ip.ip} ansible_user=${var.ssh_user} ansible_ssh_private_key_file=${pathexpand(var.private_ssh_key_path)} ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new' jar_local_path=${abspath(var.jar_local_path)} enable_node_exporter=${var.enable_observability && var.enable_node_exporter} node_exporter_port=${var.node_exporter_port} springboot_app_port=${var.springboot_app_port} enable_local_load_generator=${var.enable_local_load_generator} springboot_loadgen_target_path=${var.springboot_loadgen_target_path} springboot_loadgen_base_interval_seconds=${var.springboot_loadgen_base_interval_seconds} springboot_loadgen_randomized_delay_seconds=${var.springboot_loadgen_randomized_delay_seconds} springboot_loadgen_burst_min_requests=${var.springboot_loadgen_burst_min_requests} springboot_loadgen_burst_max_requests=${var.springboot_loadgen_burst_max_requests} springboot_loadgen_enable_stress=${var.springboot_loadgen_enable_stress} springboot_loadgen_stress_cpu_workers=${var.springboot_loadgen_stress_cpu_workers} springboot_loadgen_stress_vm_workers=${var.springboot_loadgen_stress_vm_workers} springboot_loadgen_stress_vm_bytes=${var.springboot_loadgen_stress_vm_bytes} springboot_loadgen_stress_timeout_seconds=${var.springboot_loadgen_stress_timeout_seconds} enable_local_postgresql=${var.enable_local_postgresql} postgresql_vm_listen_port=${var.postgresql_vm_listen_port} postgresql_db_name=${var.postgresql_db_name} postgresql_app_username=${var.postgresql_app_username} postgresql_source_dump_local_path=${var.postgresql_source_dump_local_path != "" && var.postgresql_source_dump_local_path != "." ? abspath(var.postgresql_source_dump_local_path) : ""} postgresql_vm_dump_path=${var.postgresql_vm_dump_path} postgresql_vm_rollback_dump_path=${var.postgresql_vm_rollback_dump_path} postgresql_expected_album_count=${var.postgresql_expected_album_count} postgresql_expected_album_fingerprint=${var.postgresql_expected_album_fingerprint} postgresql_restore_after_copy=${var.postgresql_restore_after_copy}
       EOF
     EOT
   }
@@ -237,6 +258,7 @@ resource "terraform_data" "run_ansible" {
     stackit_server.rehost_vm.server_id,
     stackit_public_ip.rehost_public_ip.ip,
     filesha256(var.jar_local_path),
+    filesha256("${path.module}/ansible/playbook.yml"),
     tostring(var.enable_observability),
     tostring(var.enable_node_exporter),
     tostring(var.node_exporter_port),
@@ -256,16 +278,22 @@ resource "terraform_data" "run_ansible" {
     tostring(var.postgresql_vm_listen_port),
     var.postgresql_db_name,
     var.postgresql_app_username,
-    var.postgresql_app_password,
+    nonsensitive(sha256(var.postgresql_app_password)),
     var.postgresql_source_dump_local_path,
     var.postgresql_vm_dump_path,
+    var.postgresql_vm_rollback_dump_path,
+    tostring(var.postgresql_expected_album_count),
+    var.postgresql_expected_album_fingerprint,
     tostring(var.postgresql_restore_after_copy),
     can(filesha256(var.postgresql_source_dump_local_path)) ? filesha256(var.postgresql_source_dump_local_path) : ""
   ]
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
-    command     = "LANG=C.UTF-8 LC_ALL=C.UTF-8 ansible-playbook -i ${path.module}/ansible/inventory.ini ${path.module}/ansible/playbook.yml"
+    environment = {
+      POSTGRESQL_APP_PASSWORD = var.postgresql_app_password
+    }
+    command = "LANG=C.UTF-8 LC_ALL=C.UTF-8 ansible-playbook -i ${path.module}/ansible/inventory.ini ${path.module}/ansible/playbook.yml"
   }
 }
 

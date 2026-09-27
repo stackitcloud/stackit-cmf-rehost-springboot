@@ -7,7 +7,7 @@ Runnable Rehost automation example for STACKIT using Terraform and Ansible.
 - Provisions network/security and a VM in STACKIT via Terraform.
 - Assigns a public IP and SSH key.
 - Bridges to Ansible to install Java, copy a Spring Boot JAR, and run it as a `systemd` service.
-- Optionally provisions STACKIT Observability, registers scrape jobs, and imports a starter Grafana dashboard.
+- Optionally provisions STACKIT Observability, registers scrape jobs, and manages a Grafana dashboard through Terraform.
 
 The repository includes a ready-to-deploy sample Spring Boot artifact at `ansible/files/springboot-app.jar`.
 By default, Terraform/Ansible deploy this artifact via `jar_local_path = "ansible/files/springboot-app.jar"`.
@@ -122,8 +122,25 @@ terraform output observability_grafana_url
 - If `enable_local_load_generator = true`, Ansible also writes request counter metrics (`springboot_http_requests_total`) via the same textfile collector.
 - Terraform creates a scrape job for node exporter (`:9100/metrics`).
 - Optionally, Terraform also creates a scrape job for `springboot_metrics_path`.
-- If `create_grafana_dashboard = true`, Terraform imports `dashboards/rehost-observability-dashboard.json` into Grafana.
+- If `create_grafana_dashboard = true`, the pinned Grafana provider manages `dashboards/rehost-observability-dashboard.json` in the `SCF Rehost` folder using the `Thanos` datasource. Terraform waits for instance readiness and fails if the datasource or dashboard cannot be created; it does not silently skip the dashboard.
 - If `enable_local_load_generator = true`, Ansible installs a local load generator (`springboot-loadgen.service` + `springboot-loadgen.timer`) that calls the app endpoint with an irregular burst profile.
+
+The dashboard template covers CPU, memory, root filesystem usage, Spring Boot health and HTTP
+status, synthetic request counts, and PostgreSQL connections, database size and transactions.
+Terraform omits the synthetic request panel when the local load generator is disabled, leaving
+seven active panels instead of displaying missing telemetry as zero.
+Synthetic requests are not a measurement of all application traffic. Database metrics require
+the VM-local PostgreSQL path; direct Actuator scraping remains optional and requires a compatible artifact.
+
+After apply, open `terraform output -raw grafana_dashboard_url` and verify current values for
+the VM scrape's `up`, `springboot_up`, `springboot_http_status_code`, and the PostgreSQL metrics.
+Require a final no-op plan as well as live data: successful resource provisioning alone does not
+prove that the exporter is reachable. Metrics ingress stays restricted to STACKIT service ranges.
+
+The provider currently authenticates with the instance's initial Grafana admin credentials, following
+the working reference setup. Protect Terraform state and saved plans because they contain credentials.
+This baseline does not configure notification receivers, alert-routing ownership, application logs
+or distributed tracing. Define and test those separately before production acceptance.
 
 ### Grafana dashboard snapshot
 

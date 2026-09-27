@@ -297,54 +297,52 @@ resource "terraform_data" "run_ansible" {
   }
 }
 
-resource "terraform_data" "grafana_dashboard" {
+resource "time_sleep" "observability_ready" {
   count = var.enable_observability && var.create_grafana_dashboard ? 1 : 0
 
-  depends_on = [
-    stackit_observability_instance.rehost_obs,
-    stackit_observability_scrapeconfig.node_exporter,
-    stackit_observability_scrapeconfig.springboot_app
-  ]
+  create_duration = "60s"
+  triggers = {
+    instance_id = stackit_observability_instance.rehost_obs[0].instance_id
+  }
+}
 
-  triggers_replace = [
-    stackit_observability_instance.rehost_obs[0].instance_id,
-    stackit_observability_instance.rehost_obs[0].grafana_url,
-    stackit_observability_instance.rehost_obs[0].grafana_initial_admin_user,
-    stackit_observability_instance.rehost_obs[0].grafana_initial_admin_password,
-    filesha256("${path.module}/dashboards/rehost-observability-dashboard.json")
-  ]
+data "grafana_data_source" "prometheus" {
+  count = var.enable_observability && var.create_grafana_dashboard ? 1 : 0
 
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    environment = {
-      GRAFANA_URL    = stackit_observability_instance.rehost_obs[0].grafana_url
-      GRAFANA_USER   = stackit_observability_instance.rehost_obs[0].grafana_initial_admin_user
-      GRAFANA_PASS   = stackit_observability_instance.rehost_obs[0].grafana_initial_admin_password
-      DASHBOARD_FILE = "${path.module}/dashboards/rehost-observability-dashboard.json"
+  name       = "Thanos"
+  depends_on = [time_sleep.observability_ready]
+}
+
+resource "grafana_folder" "rehost" {
+  count = var.enable_observability && var.create_grafana_dashboard ? 1 : 0
+
+  title                        = "SCF Rehost"
+  uid                          = "scf-rehost"
+  prevent_destroy_if_not_empty = true
+  depends_on                   = [time_sleep.observability_ready]
+}
+
+resource "grafana_dashboard" "springboot" {
+  count = var.enable_observability && var.create_grafana_dashboard ? 1 : 0
+
+  folder    = grafana_folder.rehost[0].uid
+  overwrite = true
+  config_json = jsonencode(merge(
+    jsondecode(file("${path.module}/dashboards/rehost-observability-dashboard.json")),
+    {
+      panels = [
+        for panel in jsondecode(file("${path.module}/dashboards/rehost-observability-dashboard.json")).panels : merge(panel, {
+          datasource = merge(panel.datasource, { uid = data.grafana_data_source.prometheus[0].uid })
+        })
+        if var.enable_local_load_generator || panel.title != "Spring Boot HTTP Requests (5m)"
+      ]
     }
-    command = <<-EOT
-      set -euo pipefail
+  ))
 
-        # Avoid SIGPIPE from jq|head under pipefail when multiple datasources exist.
-        PROM_UID=$(curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASS" "$GRAFANA_URL/api/datasources" | jq -r 'map(select(.type == "prometheus"))[0].uid // empty')
-
-      if [ -z "$PROM_UID" ]; then
-        echo "No Prometheus datasource uid found in Grafana; skipping dashboard import."
-        exit 0
-      fi
-
-      DASHBOARD_JSON=$(sed "s/__PROM_UID__/$PROM_UID/g" "$DASHBOARD_FILE")
-      PAYLOAD_FILE=$(mktemp)
-      trap 'rm -f "$PAYLOAD_FILE"' EXIT
-      printf '{"dashboard":%s,"overwrite":true}' "$DASHBOARD_JSON" > "$PAYLOAD_FILE"
-
-      curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASS" \
-        -H "Content-Type: application/json" \
-        -X POST \
-        "$GRAFANA_URL/api/dashboards/db" \
-        --data-binary @"$PAYLOAD_FILE" >/dev/null
-
-      echo "Grafana dashboard imported successfully."
-    EOT
+  lifecycle {
+    precondition {
+      condition     = data.grafana_data_source.prometheus[0].type == "prometheus"
+      error_message = "The Thanos datasource must be Prometheus-compatible."
+    }
   }
 }

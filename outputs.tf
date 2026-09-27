@@ -74,6 +74,10 @@ output "observability_dashboard_url" {
   value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].dashboard_url : null
 }
 
+output "grafana_dashboard_url" {
+  value = var.enable_observability && var.create_grafana_dashboard ? grafana_dashboard.springboot[0].url : null
+}
+
 output "observability_metrics_push_url" {
   value = var.enable_observability ? stackit_observability_instance.rehost_obs[0].metrics_push_url : null
 }
